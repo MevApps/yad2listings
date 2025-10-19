@@ -28,18 +28,32 @@ def get_month_number(month_text: str) -> int:
     }
     return month_mapping.get(month_text, 1)  # Default to 1 if month not found
 
-def format_date(date_str: str) -> str:
-    # Parse ISO format and return YYYY-MM-DD
-    return datetime.fromisoformat(date_str).strftime('%Y-%m-%d')
-
 def calculate_years_since_production(production_year: int, production_month: int) -> float:
     production_date = datetime(production_year, production_month, 1)
     current_date = datetime.now()
     years = (current_date - production_date).days / 365.25
     return years
 
-def process_vehicle_data(json_list: List[Dict], listing_type: str, output_file: str, mode: str = 'w') -> None:
+def process_vehicle_data(json_list: List[Dict], listing_type: str, output_file: str, mode: str = 'w', debug: bool = False) -> None:
     """Process vehicle data and write to CSV"""
+    
+    # Debug mode: inspect first item
+    if debug and json_list:
+        print(f"\n{'='*60}")
+        print(f"DEBUG: Inspecting first item in {listing_type} listings")
+        print(f"{'='*60}")
+        item = json_list[0]
+        print(f"All keys: {list(item.keys())}")
+        print(f"\nDetailed structure:")
+        for key, value in item.items():
+            if isinstance(value, dict):
+                print(f"  {key}: dict with keys {list(value.keys())}")
+            elif isinstance(value, list):
+                print(f"  {key}: list with {len(value)} items")
+            else:
+                print(f"  {key}: {type(value).__name__} = {value if not isinstance(value, str) or len(str(value)) < 50 else str(value)[:50] + '...'}")
+        print(f"{'='*60}\n")
+    
     # Define the headers we want to extract
     headers = ['adNumber', 'price', 'city', 'adType', 'model', 'subModel', 
               'productionDate', 'km', 'hand', 'createdAt', 'updatedAt', 
@@ -51,51 +65,96 @@ def process_vehicle_data(json_list: List[Dict], listing_type: str, output_file: 
         if mode == 'w':  # Only write header if we're creating a new file
             writer.writeheader()
         
+        processed_count = 0
         # Process each JSON object
         for item in json_list:
             try:
+                # Get ad number - use orderId as fallback
+                ad_number = item.get('orderId', item.get('token', 'unknown'))
+                
+                # Skip if price is 0 or missing (likely "contact dealer" listings)
+                if 'price' not in item or item['price'] == 0:
+                    continue
+                
+                # Skip if required vehicle fields are missing
+                required_fields = ['manufacturer', 'model', 'subModel', 'vehicleDates', 'token']
+                if not all(field in item for field in required_fields):
+                    continue
+                
                 # Create date string in YYYY-MM-DD format for production date
                 year = item['vehicleDates']['yearOfProduction']
-                month = get_month_number(item['vehicleDates'].get('monthOfProduction', {"text": "ינואר"})['text'])
-                production_date = f"{year}-{month:02d}-01"  # Format: YYYY-MM-DD
+                month_data = item['vehicleDates'].get('monthOfProduction', {"text": "ינואר"})
+                month = get_month_number(month_data.get('text', 'ינואר'))
+                production_date = f"{year}-{month:02d}-01"
                 
                 # Calculate years since production
                 years_since_production = calculate_years_since_production(year, month)
                 
-                # Calculate km per year
-                km = item['km']
-                km_per_year = round(km / years_since_production if years_since_production > 0 else km, 2)
+                # Handle missing km field - use 0 as default
+                # Note: km field doesn't exist in this data structure
+                km = item.get('km', 0)
+                
+                # Calculate km per year (handle division by zero)
+                if years_since_production > 0 and km > 0:
+                    km_per_year = round(km / years_since_production, 2)
+                else:
+                    km_per_year = 0
+                
+                # Extract HP from subModel text
+                hp_match = re.search(r'(\d+)\s*כ״ס', item['subModel']['text'])
+                hp = int(hp_match.group(1)) if hp_match else 0
+                
+                # Get city - handle different address structures
+                city = ''
+                if 'address' in item:
+                    if 'city' in item['address']:
+                        city = item['address']['city'].get('text', '')
+                    elif 'area' in item['address']:
+                        city = item['address']['area'].get('text', '')
+                
+                # Get description from metaData if available
+                description = ''
+                if 'metaData' in item and 'description' in item['metaData']:
+                    description = item['metaData']['description']
+                
+                # Use current date as placeholder for missing date fields
+                current_date = datetime.now().strftime('%Y-%m-%d')
                 
                 row = {
-                    'adNumber': item['adNumber'],
+                    'adNumber': ad_number,
                     'price': item['price'],
-                    'city': item['address'].get('city',{"text":""})['text'],
-                    'adType': item['adType'],
+                    'city': city,
+                    'adType': item.get('adType', ''),
                     'model': item['model']['text'],
                     'subModel': item['subModel']['text'],
-                    'hp': int(re.search(r'(\d+)\s*כ״ס', item['subModel']['text']).group(1)) if re.search(r'(\d+)\s*כ״ס', item['subModel']['text']) else 0,
+                    'hp': hp,
                     'make': item['manufacturer']['text'],
                     'productionDate': production_date,
-                    'km': item['km'],
-                    'hand': item['hand']["id"],
-                    'createdAt': format_date(item['dates']['createdAt']),
-                    'updatedAt': format_date(item['dates']['updatedAt']),
-                    'rebouncedAt': format_date(item['dates']['rebouncedAt']),
+                    'km': km,
+                    'hand': item.get('hand', {"id": 0})["id"],
+                    'createdAt': current_date,  # Not available in this data structure
+                    'updatedAt': current_date,  # Not available in this data structure
+                    'rebouncedAt': current_date,  # Not available in this data structure
                     'listingType': listing_type,
-                    'number_of_years': years_since_production,
+                    'number_of_years': round(years_since_production, 2),
                     'km_per_year': km_per_year,
-                    'description': item["metaData"]["description"],
+                    'description': description,
                     'link': f'https://www.yad2.co.il/vehicles/item/{item["token"]}',
                 }
                 writer.writerow(row)
+                processed_count += 1
             except KeyError as e:
-                print(f"Skipping item due to missing key: {e}")
-                print (item)
-                exit(-1)
+                if debug:
+                    print(f"Skipping item {ad_number} due to missing key: {e}")
             except Exception as e:
-                print(f"Error processing item: {e}")
+                if debug:
+                    print(f"Error processing item {ad_number}: {e}")
+        
+        # Report how many items were actually processed
+        if processed_count > 0:
+            print(f"✓ Successfully processed {processed_count} valid items")
 
-def process_directory(directory_path: str) -> None:
+def process_directory(directory_path: str, debug: bool = False) -> None:
     """Process all HTML files in a directory and combine the data"""
     # Get directory name for the output file
     dir_name = Path(directory_path).name
@@ -117,40 +176,32 @@ def process_directory(directory_path: str) -> None:
                     commercial_list = listings_data.get('commercial', [])
                     if commercial_list:
                         mode = 'a' if os.path.exists(output_path) else 'w'
-                        process_vehicle_data(commercial_list, 'commercial', output_path, mode)
-                        print(f"Processed {len(commercial_list)} commercial listings")
+                        process_vehicle_data(commercial_list, 'commercial', output_path, mode, debug=debug)
+                        debug = False  # Only debug first batch
                     
                     # Process private listings
                     private_list = listings_data.get('private', [])
                     if private_list:
                         mode = 'a' if os.path.exists(output_path) else 'w'
                         process_vehicle_data(private_list, 'private', output_path, mode)
-                        print(f"Processed {len(private_list)} private listings")
                     
-                    # Process private listings
-                    private_list = listings_data.get('solo', [])
-                    if private_list:
+                    # Process solo listings
+                    solo_list = listings_data.get('solo', [])
+                    if solo_list:
                         mode = 'a' if os.path.exists(output_path) else 'w'
-                        process_vehicle_data(private_list, 'solo', output_path, mode)
-                        print(f"Processed {len(private_list)} solo listings")
+                        process_vehicle_data(solo_list, 'solo', output_path, mode)
                     
-                    private_list = listings_data.get('platinum', [])
-                    if private_list:
+                    # Process platinum listings
+                    platinum_list = listings_data.get('platinum', [])
+                    if platinum_list:
                         mode = 'a' if os.path.exists(output_path) else 'w'
-                        process_vehicle_data(private_list, 'platinum', output_path, mode)
-                        print(f"Processed {len(private_list)} platinum listings")
+                        process_vehicle_data(platinum_list, 'platinum', output_path, mode)
                     
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
     
-    print(f"Output saved to: {output_path}")
+    print(f"\n✓ Output saved to: {output_path}")
 
 if __name__ == "__main__":
     directory_path = "scraped_vehicles"
-    process_directory(directory_path)
-    
-    # Upload to Google Drive
-    output_file = f"{Path(directory_path).name}_summary.csv"
-    output_path = os.path.join(directory_path, output_file)
-    upload_drive.upload_to_sheet(output_path)
-    os.unlink(output_path)
+    process_directory(directory_path, debug=True)
